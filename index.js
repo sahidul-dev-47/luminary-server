@@ -7,7 +7,7 @@ app.use(cors());
 app.use(express.json());
 const port = 5000;
 
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const uri = process.env.MONGODB_URI;
 
@@ -25,8 +25,40 @@ async function run() {
 
     
  const database = client.db("luminary_db");
+ const ebooksCollection = database.collection('ebooks')
 
 
+ app.get('/api/ebooks', async(req, res) => {
+  const result = await ebooksCollection.find().toArray()
+  res.send(result)
+ })
+
+
+app.get('/api/ebooks/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    
+    const result = await ebooksCollection.findOne({ 
+      $or: [
+        { _id: id },                    
+        { _id: new ObjectId(id) }      
+      ]
+    });
+
+    if (!result) {
+      return res.status(404).json({ 
+        message: "Ebook not found", 
+        requestedId: id 
+      });
+    }
+
+    res.json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
  
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
