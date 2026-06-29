@@ -1,15 +1,33 @@
 const express = require("express");
 const cors = require('cors');
 const Stripe = require('stripe');
-
-const app = express();
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require('dotenv').config();
 
-app.use(cors());
-app.use(express.json());
-const port = 5000;
+const app = express();
+const port = process.env.PORT || 5000;
 
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+
+const allowedOrigins = [
+  "http://localhost:3000",             
+  "https://luminary-client.vercel.app" 
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS by Luminary Server'));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+app.use(express.json());
 
 const uri = process.env.MONGODB_URI;
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -22,27 +40,41 @@ const client = new MongoClient(uri, {
   },
 });
 
-async function run() {
+
+async function connectDB() {
   try {
     await client.connect();
+    console.log("Successfully connected to MongoDB!");
+  } catch (error) {
+    console.error("MongoDB Connection Error:", error);
+  }
+}
+connectDB();
 
-    
- const database = client.db("luminary_db");
- const ebooksCollection = database.collection('ebooks')
- const userCollection = database.collection('user')
- const transactionsCollection = database.collection('transaction')
+const database = client.db("luminary_db");
+const ebooksCollection = database.collection('ebooks');
+const userCollection = database.collection('user');
+const transactionsCollection = database.collection('transaction');
 
 
- app.get('/api/ebooks', async(req, res) => {
-  const result = await ebooksCollection.find().toArray()
-  res.send(result)
- })
+app.get("/", (req, res) => {
+  res.send("Luminary Server is Running Perfectly!");
+});
+
+
+app.get('/api/ebooks', async (req, res) => {
+  try {
+    const result = await ebooksCollection.find().toArray();
+    res.send(result);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching ebooks" });
+  }
+});
 
 
 app.get('/api/ebooks/:id', async (req, res) => {
   try {
     const id = req.params.id;
-
     
     const result = await ebooksCollection.findOne({ 
       $or: [
@@ -65,18 +97,21 @@ app.get('/api/ebooks/:id', async (req, res) => {
   }
 });
 
-app.post('/api/ebooks', async(req,res) => {
-  const ebook = req.body;
-  const newEbook = {
-    ...ebook,
-    createdAt: new Date()
+
+app.post('/api/ebooks', async (req, res) => {
+  try {
+    const ebook = req.body;
+    const newEbook = {
+      ...ebook,
+      createdAt: new Date()
+    };
+
+    const result = await ebooksCollection.insertOne(newEbook);
+    res.send(result);
+  } catch (error) {
+    res.status(500).json({ message: "Error inserting ebook" });
   }
-
-  const result = await ebooksCollection.insertOne(newEbook);
-  res.send(result);
-})
-
-// transaction 
+});
 
 
 app.post('/api/v1/payments/verify-status', async (req, res) => {
@@ -92,7 +127,7 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
     if (session.payment_status === 'paid') {
       const { ebookId, buyerEmail, price } = session.metadata;
 
-      // Duplicate check
+      
       const isAlreadyProcessed = await transactionsCollection.findOne({ 
         transactionId: session.id 
       });
@@ -101,7 +136,7 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
         return res.status(200).json({ success: true, message: "Already processed." });
       }
 
-      // Insert Transaction
+      
       const transactionInfo = {
         transactionId: session.id,
         ebookId,
@@ -113,20 +148,17 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       
       await transactionsCollection.insertOne(transactionInfo);
 
-      // Update Ebook Status
+    
       await ebooksCollection.updateOne(
         { $or: [{ _id: ebookId }, { _id: new ObjectId(ebookId) }] },
         { $set: { status: 'Sold' } }
       );
 
-      // Update User
+      
       await userCollection.updateOne(
         { email: buyerEmail },
         { 
-          $set: { 
-            lastPurchaseAt: new Date(),
-            
-          },
+          $set: { lastPurchaseAt: new Date() },
           $push: { purchasedEbooks: ebookId }
         }
       );
@@ -144,22 +176,10 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
- 
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-  } catch (error) {
-    console.error(error);
-  }
-}
-
-run().then(() => {
-  app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`);
-  });
-}).catch(console.dir);
 
 
-app.get("/", (req, res) => {
-  res.send("Hello World!");
+app.listen(port, () => {
+  console.log(`Luminary server listening on port ${port}`);
 });
-  
+
+module.exports = app;
