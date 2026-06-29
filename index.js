@@ -59,6 +59,17 @@ app.get('/api/ebooks/:id', async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+app.post('/api/ebooks', async(req,res) => {
+  const ebook = req.body;
+  const newEbook = {
+    ...ebook,
+    createdAt: new Date()
+  }
+
+  const result = await ebooksCollection.insertOne(newEbook);
+  res.send(result);
+})
  
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
