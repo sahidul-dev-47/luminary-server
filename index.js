@@ -28,32 +28,43 @@ app.use(cors({
 
 app.use(express.json());
 
-// MongoDB & Stripe Setup
-const uri = process.env.MONGODB_URI;
+// Stripe Setup
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
+// MongoDB Setup (Serverless Friendly)
+let client = null;
+let database = null;
+let ebooksCollection = null;
+let userCollection = null;
+let transactionsCollection = null;
+
+const uri = process.env.MONGODB_URI;
 
 async function connectDB() {
   try {
-    await client.connect();
-    console.log("Successfully connected to MongoDB!");
+    if (!client) {
+      client = new MongoClient(uri, {
+        serverApi: {
+          version: ServerApiVersion.v1,
+          strict: true,
+          deprecationErrors: true,
+        },
+      });
+
+      await client.connect();
+      console.log(" MongoDB Connected Successfully!");
+
+      database = client.db("luminary_db");
+      ebooksCollection = database.collection('ebooks');
+      userCollection = database.collection('user');
+      transactionsCollection = database.collection('transaction');
+    }
+    return database;
   } catch (error) {
     console.error("MongoDB Connection Error:", error);
+    throw error;
   }
 }
-connectDB();
-
-const database = client.db("luminary_db");
-const ebooksCollection = database.collection('ebooks');
-const userCollection = database.collection('user');
-const transactionsCollection = database.collection('transaction');
 
 // ====================== ROUTES ======================
 
@@ -64,9 +75,11 @@ app.get("/", (req, res) => {
 // Get all ebooks
 app.get('/api/ebooks', async (req, res) => {
   try {
+    await connectDB();
     const result = await ebooksCollection.find().toArray();
     res.send(result);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ message: "Error fetching ebooks" });
   }
 });
@@ -74,6 +87,7 @@ app.get('/api/ebooks', async (req, res) => {
 // Get single ebook
 app.get('/api/ebooks/:id', async (req, res) => {
   try {
+    await connectDB();
     const id = req.params.id;
     const result = await ebooksCollection.findOne({ 
       $or: [
@@ -95,6 +109,7 @@ app.get('/api/ebooks/:id', async (req, res) => {
 // Create ebook
 app.post('/api/ebooks', async (req, res) => {
   try {
+    await connectDB();
     const ebook = req.body;
     const newEbook = {
       ...ebook,
@@ -106,11 +121,12 @@ app.post('/api/ebooks', async (req, res) => {
     const result = await ebooksCollection.insertOne(newEbook);
     res.send(result);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ message: "Error inserting ebook" });
   }
 });
 
-// === PAYMENT VERIFICATION ===
+// === PAYMENT VERIFICATION (Main Fix) ===
 app.post('/api/v1/payments/verify-status', async (req, res) => {
   try {
     const { session_id } = req.body;
@@ -118,6 +134,9 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
     if (!session_id) {
       return res.status(400).json({ message: "Session ID is required" });
     }
+
+    // Ensure DB connection before any operation
+    await connectDB();
 
     const session = await stripe.checkout.sessions.retrieve(session_id);
 
@@ -171,6 +190,8 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       }
     );
 
+    console.log(` Transaction saved for session: ${session.id}`);
+
     return res.status(200).json({ 
       success: true, 
       message: "Payment verified and database updated successfully." 
@@ -186,15 +207,13 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
   }
 });
 
-// **Local e run korar jonno + Vercel er jonno**
+// Local vs Vercel
 if (require.main === module) {
-  // Local development
   app.listen(port, () => {
     console.log(`Luminary server listening on port ${port}`);
   });
 } else {
-  // For Vercel
-  console.log("Vercel Serverless Mode");
+  console.log(" Vercel Serverless Mode");
 }
 
 module.exports = app;
