@@ -8,16 +8,17 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 const allowedOrigins = [
-  "http://localhost:3000",             
-  "https://luminary-client.vercel.app" 
+  "http://localhost:3000",
+  "https://luminary-client.vercel.app"
 ];
 
+// Middleware
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS by Luminary Server'));
+      callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
@@ -27,6 +28,7 @@ app.use(cors({
 
 app.use(express.json());
 
+// MongoDB & Stripe Setup
 const uri = process.env.MONGODB_URI;
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -41,9 +43,9 @@ const client = new MongoClient(uri, {
 async function connectDB() {
   try {
     await client.connect();
-    console.log(" Successfully connected to MongoDB!");
+    console.log("Successfully connected to MongoDB!");
   } catch (error) {
-    console.error(" MongoDB Connection Error:", error);
+    console.error("MongoDB Connection Error:", error);
   }
 }
 connectDB();
@@ -73,21 +75,16 @@ app.get('/api/ebooks', async (req, res) => {
 app.get('/api/ebooks/:id', async (req, res) => {
   try {
     const id = req.params.id;
-    
     const result = await ebooksCollection.findOne({ 
       $or: [
-        { _id: id },                    
-        { _id: new ObjectId(id) }      
+        { _id: id },
+        { _id: new ObjectId(id) }
       ]
     });
 
     if (!result) {
-      return res.status(404).json({ 
-        message: "Ebook not found", 
-        requestedId: id 
-      });
+      return res.status(404).json({ message: "Ebook not found" });
     }
-
     res.json(result);
   } catch (error) {
     console.error(error);
@@ -101,7 +98,7 @@ app.post('/api/ebooks', async (req, res) => {
     const ebook = req.body;
     const newEbook = {
       ...ebook,
-      status: "Available",      
+      status: "Available",
       soldCount: 0,
       createdAt: new Date()
     };
@@ -118,14 +115,11 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
   try {
     const { session_id } = req.body;
     
-    console.log(" Verify Called with session_id:", session_id);
-
     if (!session_id) {
       return res.status(400).json({ message: "Session ID is required" });
     }
 
     const session = await stripe.checkout.sessions.retrieve(session_id);
-    console.log(" Stripe Session Metadata:", session.metadata);
 
     if (session.payment_status !== 'paid') {
       return res.status(400).json({ success: false, message: 'Payment not completed.' });
@@ -137,17 +131,16 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing metadata" });
     }
 
-    // Check already processed
+    // Check duplicate
     const isAlreadyProcessed = await transactionsCollection.findOne({ 
       transactionId: session.id 
     });
 
     if (isAlreadyProcessed) {
-      console.log(" Already processed transaction");
       return res.status(200).json({ success: true, message: "Already processed." });
     }
 
-    // === TRANSACTION INSERT ===
+    // Insert Transaction
     const transactionInfo = {
       transactionId: session.id,
       ebookId,
@@ -158,32 +151,19 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       createdAt: new Date()
     };
     
-    const txResult = await transactionsCollection.insertOne(transactionInfo);
-    console.log("Transaction Inserted:", txResult.insertedId);
+    await transactionsCollection.insertOne(transactionInfo);
 
-    // === UPDATE EBOOK 
-    const ebookQuery = {
-      $or: [
-        { _id: ebookId },
-        { _id: new ObjectId(ebookId) }   
-      ]
-    };
-
-    const ebookUpdate = await ebooksCollection.updateOne(
-      ebookQuery,
+    // Update Ebook
+    await ebooksCollection.updateOne(
+      { $or: [{ _id: ebookId }, { _id: new ObjectId(ebookId) }] },
       { 
-        $inc: { soldCount: 1 },           
-        $set: { 
-          lastSoldAt: new Date(),
-          
-        } 
+        $inc: { soldCount: 1 },
+        $set: { lastSoldAt: new Date() }
       }
     );
 
-    console.log(" Ebook Update Result:", ebookUpdate);
-
-    // === UPDATE BUYER ===
-    const buyerUpdate = await userCollection.updateOne(
+    // Update Buyer
+    await userCollection.updateOne(
       { email: buyerEmail },
       { 
         $set: { lastPurchaseAt: new Date() },
@@ -191,15 +171,13 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       }
     );
 
-    console.log(" Buyer Update Result:", buyerUpdate);
-
     return res.status(200).json({ 
       success: true, 
       message: "Payment verified and database updated successfully." 
     });
 
   } catch (error) {
-    console.error(" VERIFICATION ERROR:", error);
+    console.error("VERIFICATION ERROR:", error);
     res.status(500).json({ 
       success: false, 
       message: "Server error", 
@@ -208,8 +186,15 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(` Luminary server listening on port ${port}`);
-});
+// **Local e run korar jonno + Vercel er jonno**
+if (require.main === module) {
+  // Local development
+  app.listen(port, () => {
+    console.log(`Luminary server listening on port ${port}`);
+  });
+} else {
+  // For Vercel
+  console.log("Vercel Serverless Mode");
+}
 
 module.exports = app;
