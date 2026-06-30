@@ -31,7 +31,7 @@ app.use(express.json());
 // Stripe Setup
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// MongoDB Setup (Serverless Friendly)
+// MongoDB Setup
 let client = null;
 let database = null;
 let ebooksCollection = null;
@@ -90,15 +90,10 @@ app.get('/api/ebooks/:id', async (req, res) => {
     await connectDB();
     const id = req.params.id;
     const result = await ebooksCollection.findOne({ 
-      $or: [
-        { _id: id },
-        { _id: new ObjectId(id) }
-      ]
+      $or: [{ _id: id }, { _id: new ObjectId(id) }]
     });
 
-    if (!result) {
-      return res.status(404).json({ message: "Ebook not found" });
-    }
+    if (!result) return res.status(404).json({ message: "Ebook not found" });
     res.json(result);
   } catch (error) {
     console.error(error);
@@ -126,7 +121,7 @@ app.post('/api/ebooks', async (req, res) => {
   }
 });
 
-// === PAYMENT VERIFICATION (Main Fix) ===
+// === PAYMENT VERIFICATION ===
 app.post('/api/v1/payments/verify-status', async (req, res) => {
   try {
     const { session_id } = req.body;
@@ -135,7 +130,6 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       return res.status(400).json({ message: "Session ID is required" });
     }
 
-    // Ensure DB connection before any operation
     await connectDB();
 
     const session = await stripe.checkout.sessions.retrieve(session_id);
@@ -144,13 +138,12 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payment not completed.' });
     }
 
-    const { ebookId, buyerEmail, price, writerId } = session.metadata;
+    const { ebookId, buyerEmail, price, writerId } = session.metadata || {};
 
     if (!ebookId || !buyerEmail) {
-      return res.status(400).json({ success: false, message: "Missing metadata" });
+      return res.status(400).json({ success: false, message: "Missing metadata from Stripe session" });
     }
 
-    // Check duplicate
     const isAlreadyProcessed = await transactionsCollection.findOne({ 
       transactionId: session.id 
     });
@@ -159,34 +152,40 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       return res.status(200).json({ success: true, message: "Already processed." });
     }
 
+    const finalAmount = price ? parseFloat(price) : (session.amount_total ? session.amount_total / 100 : 0);
+
     // Insert Transaction
     const transactionInfo = {
       transactionId: session.id,
       ebookId,
       buyerEmail,
       writerId: writerId || "unknown",
-      amount: parseFloat(price),
+      amount: finalAmount,
       paymentStatus: 'paid',
       createdAt: new Date()
     };
     
     await transactionsCollection.insertOne(transactionInfo);
 
-    // Update Ebook
-    await ebooksCollection.updateOne(
-      { $or: [{ _id: ebookId }, { _id: new ObjectId(ebookId) }] },
-      { 
-        $inc: { soldCount: 1 },
-        $set: { lastSoldAt: new Date() }
+    let mongoEbookId = ebookId;
+    try {
+      if (ObjectId.isValid(ebookId)) {
+        mongoEbookId = new ObjectId(ebookId);
       }
+    } catch (e) {}
+
+    // Update Ebook Sold Count
+    await ebooksCollection.updateOne(
+      { $or: [{ _id: ebookId }, { _id: mongoEbookId }] },
+      { $inc: { soldCount: 1 }, $set: { lastSoldAt: new Date() } }
     );
 
-    // Update Buyer
+    // Update Buyer Profile
     await userCollection.updateOne(
       { email: buyerEmail },
       { 
-        $set: { lastPurchaseAt: new Date() },
-        $push: { purchasedEbooks: ebookId }
+        $set: { lastPurchaseAt: new Date() }, 
+        $addToSet: { purchasedEbooks: ebookId } 
       }
     );
 
@@ -201,9 +200,171 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
     console.error("VERIFICATION ERROR:", error);
     res.status(500).json({ 
       success: false, 
-      message: "Server error", 
+      message: "Server error during verification", 
       error: error.message 
     });
+  }
+});
+
+// ==================== READER APIs ====================
+
+// Get User's Purchase History
+app.get('/api/v1/users/purchases', async (req, res) => {
+  try {
+    await connectDB();
+    const { email } = req.query;
+
+    if (!email) return res.status(400).json({ success: false, message: "Email is required" });
+
+    const purchases = await transactionsCollection
+      .find({ buyerEmail: email })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const purchasesWithDetails = await Promise.all(
+      purchases.map(async (purchase) => {
+        const ebook = await ebooksCollection.findOne({
+          $or: [{ _id: purchase.ebookId }, { _id: new ObjectId(purchase.ebookId) }]
+        });
+        return {
+          ...purchase,
+          ebookTitle: ebook?.title || "Ebook Not Found",
+          ebookCover: ebook?.coverImage || null,
+          writerId: ebook?.writerId || purchase.writerId,
+        };
+      })
+    );
+
+    res.json({ success: true, purchases: purchasesWithDetails });
+  } catch (error) {
+    console.error("Purchase History Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Get User's Bookmarks
+app.get('/api/v1/users/bookmarks', async (req, res) => {
+  try {
+    await connectDB();
+    const { email } = req.query;
+
+    if (!email) return res.status(400).json({ success: false, message: "Email is required" });
+
+    const user = await userCollection.findOne({ email });
+
+    if (!user || !user.bookmarks || user.bookmarks.length === 0) {
+      return res.json({ success: true, bookmarks: [] });
+    }
+
+    const bookmarks = await ebooksCollection
+      .find({ _id: { $in: user.bookmarks } })
+      .toArray();
+
+    res.json({
+      success: true,
+      bookmarks: bookmarks.map(book => ({
+        ebookId: book._id,
+        ebookTitle: book.title,
+        ebookCover: book.coverImage,
+        writerName: book.writerName || "Unknown Writer",
+        price: book.price
+      }))
+    });
+
+  } catch (error) {
+    console.error("Bookmarks Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ==================== NEW: BOOKMARK TOGGLE ====================
+app.post('/api/v1/users/bookmark', async (req, res) => {
+  try {
+    await connectDB();
+    const { email, ebookId } = req.body;
+
+    if (!email || !ebookId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Email and ebookId are required" 
+      });
+    }
+
+    const user = await userCollection.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "User not found" 
+      });
+    }
+
+    const isAlreadyBookmarked = (user.bookmarks || []).includes(ebookId);
+
+    if (isAlreadyBookmarked) {
+      await userCollection.updateOne(
+        { email },
+        { $pull: { bookmarks: ebookId } }
+      );
+    } else {
+      await userCollection.updateOne(
+        { email },
+        { $addToSet: { bookmarks: ebookId } }
+      );
+    }
+
+    res.json({
+      success: true,
+      message: isAlreadyBookmarked ? "Bookmark removed" : "Bookmark saved successfully",
+      bookmarked: !isAlreadyBookmarked
+    });
+
+  } catch (error) {
+    console.error("Bookmark Error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error while saving bookmark" 
+    });
+  }
+});
+
+// Get User Profile
+app.get('/api/v1/users/profile', async (req, res) => {
+  try {
+    await connectDB();
+    const { email } = req.query;
+
+    if (!email) return res.status(400).json({ success: false, message: "Email is required" });
+
+    const userData = await userCollection.findOne({ email }, { projection: { password: 0 } });
+
+    if (!userData) return res.status(404).json({ success: false, message: "User not found" });
+
+    res.json({ success: true, user: userData });
+  } catch (error) {
+    console.error("Profile Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Update User Profile
+app.put('/api/v1/users/profile', async (req, res) => {
+  try {
+    await connectDB();
+    const { email, name, ...updateData } = req.body;
+
+    if (!email) return res.status(400).json({ success: false, message: "Email is required" });
+
+    const result = await userCollection.updateOne({ email }, { $set: updateData });
+
+    if (result.modifiedCount === 0) {
+      return res.status(400).json({ success: false, message: "No changes made" });
+    }
+
+    res.json({ success: true, message: "Profile updated successfully" });
+  } catch (error) {
+    console.error("Update Profile Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
