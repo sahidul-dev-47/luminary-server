@@ -22,7 +22,7 @@ app.use(cors({
     }
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
@@ -42,6 +42,10 @@ const uri = process.env.MONGODB_URI;
 
 async function connectDB() {
   try {
+    if (!uri) {
+      throw new Error("MONGODB_URI is not set in environment variables");
+    }
+
     if (!client) {
       client = new MongoClient(uri, {
         serverApi: {
@@ -52,7 +56,7 @@ async function connectDB() {
       });
 
       await client.connect();
-      console.log(" MongoDB Connected Successfully!");
+      console.log("MongoDB Connected Successfully!");
 
       database = client.db("luminary_db");
       ebooksCollection = database.collection('ebooks');
@@ -61,7 +65,7 @@ async function connectDB() {
     }
     return database;
   } catch (error) {
-    console.error("MongoDB Connection Error:", error);
+    console.error("MongoDB Connection Error:", error.message);
     throw error;
   }
 }
@@ -89,7 +93,7 @@ app.get('/api/ebooks/:id', async (req, res) => {
   try {
     await connectDB();
     const id = req.params.id;
-    const result = await ebooksCollection.findOne({ 
+    const result = await ebooksCollection.findOne({
       $or: [{ _id: id }, { _id: new ObjectId(id) }]
     });
 
@@ -122,6 +126,7 @@ app.post('/api/ebooks', async (req, res) => {
 });
 
 // === PAYMENT VERIFICATION ===
+
 app.post('/api/v1/payments/verify-status', async (req, res) => {
   try {
     const { session_id } = req.body;
@@ -138,7 +143,7 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payment not completed.' });
     }
 
-    const { ebookId, buyerEmail, price, writerId } = session.metadata || {};
+    const { ebookId, buyerEmail, price, writerId, writerEmail } = session.metadata || {};
 
     if (!ebookId || !buyerEmail) {
       return res.status(400).json({ success: false, message: "Missing metadata from Stripe session" });
@@ -154,12 +159,13 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
 
     const finalAmount = price ? parseFloat(price) : (session.amount_total ? session.amount_total / 100 : 0);
 
-    // Insert Transaction
+    // Insert Transaction with writer info
     const transactionInfo = {
       transactionId: session.id,
       ebookId,
       buyerEmail,
       writerId: writerId || "unknown",
+      writerEmail: writerEmail || "unknown",   
       amount: finalAmount,
       paymentStatus: 'paid',
       createdAt: new Date()
@@ -174,13 +180,13 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       }
     } catch (e) {}
 
-    // Update Ebook Sold Count
+    // Update Ebook
     await ebooksCollection.updateOne(
       { $or: [{ _id: ebookId }, { _id: mongoEbookId }] },
       { $inc: { soldCount: 1 }, $set: { lastSoldAt: new Date() } }
     );
 
-    // Update Buyer Profile
+    // Update Buyer
     await userCollection.updateOne(
       { email: buyerEmail },
       { 
@@ -189,7 +195,7 @@ app.post('/api/v1/payments/verify-status', async (req, res) => {
       }
     );
 
-    console.log(` Transaction saved for session: ${session.id}`);
+    console.log(`Transaction saved for writer: ${writerEmail}`);
 
     return res.status(200).json({ 
       success: true, 
@@ -284,18 +290,18 @@ app.post('/api/v1/users/bookmark', async (req, res) => {
     const { email, ebookId } = req.body;
 
     if (!email || !ebookId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Email and ebookId are required" 
+      return res.status(400).json({
+        success: false,
+        message: "Email and ebookId are required"
       });
     }
 
     const user = await userCollection.findOne({ email });
 
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "User not found" 
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
       });
     }
 
@@ -321,9 +327,9 @@ app.post('/api/v1/users/bookmark', async (req, res) => {
 
   } catch (error) {
     console.error("Bookmark Error:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Server error while saving bookmark" 
+    res.status(500).json({
+      success: false,
+      message: "Server error while saving bookmark"
     });
   }
 });
@@ -368,13 +374,354 @@ app.put('/api/v1/users/profile', async (req, res) => {
   }
 });
 
+// ==================== WRITER APIs ====================
+
+// Get all ebooks 
+app.get('/api/v1/writer/ebooks', async (req, res) => {
+  try {
+    await connectDB();
+    const { writerId } = req.query;
+
+    if (!writerId) return res.status(400).json({ success: false, message: "writerId is required" });
+
+    const ebooks = await ebooksCollection
+      .find({ writerId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ success: true, ebooks });
+  } catch (error) {
+    console.error("Writer Ebooks Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Get a single writer
+app.get('/api/v1/writer/ebooks/:id', async (req, res) => {
+  try {
+    await connectDB();
+    const { id } = req.params;
+    const { writerId } = req.query;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid ebook id" });
+    }
+
+    const ebook = await ebooksCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!ebook) return res.status(404).json({ success: false, message: "Ebook not found" });
+    if (writerId && ebook.writerId !== writerId) {
+      return res.status(403).json({ success: false, message: "Not authorized to view this ebook" });
+    }
+
+    res.json({ success: true, ebook });
+  } catch (error) {
+    console.error("Get Writer Ebook Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Create a new ebook as a writer
+app.post('/api/v1/writer/ebooks', async (req, res) => {
+  try {
+    await connectDB();
+    const { title, description, price, genre, coverImage, writerId, writerEmail, writerName } = req.body;
+
+    if (!title || !price || !genre || !writerId) {
+      return res.status(400).json({ success: false, message: "Missing required fields" });
+    }
+
+    const newEbook = {
+      title,
+      description: description || "",
+      price: parseFloat(price),
+      genre,
+      coverImage: coverImage || null,
+      writerId,                  
+      writerEmail: writerEmail || writerId,   
+      writerName: writerName || "Unknown Writer",
+      status: "Unpublished",       
+      soldCount: 0,
+      createdAt: new Date(),
+    };
+
+    const result = await ebooksCollection.insertOne(newEbook);
+    res.status(201).json({
+      success: true,
+      message: "Ebook created successfully as Unpublished",
+      ebookId: result.insertedId,
+    });
+  } catch (error) {
+    console.error("Create Ebook Error:", error);
+    res.status(500).json({ success: false, message: "Server error while creating ebook" });
+  }
+});
+// Update an ebook 
+app.put('/api/v1/writer/ebooks/:id', async (req, res) => {
+  try {
+    await connectDB();
+    const { id } = req.params;
+    const { writerId, title, description, price, genre, coverImage } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid ebook id" });
+    }
+
+    const existing = await ebooksCollection.findOne({ _id: new ObjectId(id) });
+    if (!existing) return res.status(404).json({ success: false, message: "Ebook not found" });
+    if (existing.writerId !== writerId) {
+      return res.status(403).json({ success: false, message: "Not authorized to edit this ebook" });
+    }
+
+    const updateFields = {
+      ...(title && { title }),
+      ...(description && { description }),
+      ...(price && { price: parseFloat(price) }),
+      ...(genre && { genre }),
+      ...(coverImage && { coverImage }),
+      updatedAt: new Date(),
+    };
+
+    await ebooksCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateFields });
+    res.json({ success: true, message: "Ebook updated successfully" });
+  } catch (error) {
+    console.error("Update Ebook Error:", error);
+    res.status(500).json({ success: false, message: "Server error while updating ebook" });
+  }
+});
+
+// Toggle publish 
+app.patch('/api/v1/writer/ebooks/:id/toggle-status', async (req, res) => {
+  try {
+    await connectDB();
+    const { id } = req.params;
+    const { writerId } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid ebook id" });
+    }
+
+    const existing = await ebooksCollection.findOne({ _id: new ObjectId(id) });
+    if (!existing) return res.status(404).json({ success: false, message: "Ebook not found" });
+    if (existing.writerId !== writerId) {
+      return res.status(403).json({ success: false, message: "Not authorized to update this ebook" });
+    }
+
+    const newStatus = existing.status === "Published" ? "Unpublished" : "Published";
+    await ebooksCollection.updateOne({ _id: new ObjectId(id) }, { $set: { status: newStatus } });
+
+    res.json({ success: true, message: `Ebook ${newStatus.toLowerCase()}`, status: newStatus });
+  } catch (error) {
+    console.error("Toggle Status Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
+app.delete('/api/v1/writer/ebooks/:id', async (req, res) => {
+  try {
+    await connectDB();
+    const { id } = req.params;
+    const { writerId } = req.query;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid ebook id" });
+    }
+
+    const existing = await ebooksCollection.findOne({ _id: new ObjectId(id) });
+    if (!existing) return res.status(404).json({ success: false, message: "Ebook not found" });
+    if (writerId && existing.writerId !== writerId) {
+      return res.status(403).json({ success: false, message: "Not authorized to delete this ebook" });
+    }
+
+    await ebooksCollection.deleteOne({ _id: new ObjectId(id) });
+    res.json({ success: true, message: "Ebook deleted successfully" });
+  } catch (error) {
+    console.error("Delete Ebook Error:", error);
+    res.status(500).json({ success: false, message: "Server error while deleting ebook" });
+  }
+});
+
+// ==================== WRITER BOOKMARK ====================
+
+// Toggle Bookmark for Writer
+app.post('/api/v1/writer/bookmark', async (req, res) => {
+  try {
+    await connectDB();
+    const { email, ebookId } = req.body;   
+
+    if (!email || !ebookId) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and ebookId are required"
+      });
+    }
+
+    const user = await userCollection.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const isAlreadyBookmarked = (user.bookmarks || []).includes(ebookId);
+
+    if (isAlreadyBookmarked) {
+      await userCollection.updateOne(
+        { email },
+        { $pull: { bookmarks: ebookId } }
+      );
+    } else {
+      await userCollection.updateOne(
+        { email },
+        { $addToSet: { bookmarks: ebookId } }
+      );
+    }
+
+    res.json({
+      success: true,
+      message: isAlreadyBookmarked ? "Bookmark removed" : "Bookmark saved successfully",
+      bookmarked: !isAlreadyBookmarked
+    });
+
+  } catch (error) {
+    console.error("Writer Bookmark Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error while saving bookmark"
+    });
+  }
+});
+
+// Get Writer's Bookmarks
+app.get('/api/v1/writer/bookmarks', async (req, res) => {
+  try {
+    await connectDB();
+    const { email } = req.query;
+
+    if (!email) return res.status(400).json({ success: false, message: "Email is required" });
+
+    const user = await userCollection.findOne({ email });
+
+    if (!user || !user.bookmarks || user.bookmarks.length === 0) {
+      return res.json({ success: true, bookmarks: [] });
+    }
+
+    const bookmarks = await ebooksCollection
+      .find({ _id: { $in: user.bookmarks } })
+      .toArray();
+
+    res.json({
+      success: true,
+      bookmarks: bookmarks.map(book => ({
+        ebookId: book._id,
+        ebookTitle: book.title,
+        ebookCover: book.coverImage,
+        writerName: book.writerName || "Unknown Writer",
+        writerEmail: book.writerEmail || "unknown Email" ,
+        price: book.price,
+        status: book.status
+      }))
+    });
+
+  } catch (error) {
+    console.error("Writer Bookmarks Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
+
+app.get('/api/v1/writer/sales', async (req, res) => {
+  try {
+    await connectDB();
+    const { writerId, writerEmail } = req.query;
+
+    if (!writerId && !writerEmail) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "writerId or writerEmail is required" 
+      });
+    }
+
+    // Flexible query - duitai support korbe
+    const query = {};
+    if (writerId) query.writerId = writerId;
+    if (writerEmail) query.writerEmail = writerEmail;
+
+    const sales = await transactionsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const salesWithDetails = await Promise.all(
+      sales.map(async (sale) => {
+        let ebook = null;
+        if (ObjectId.isValid(sale.ebookId)) {
+          ebook = await ebooksCollection.findOne({ _id: new ObjectId(sale.ebookId) });
+        }
+        return {
+          ...sale,
+          ebookTitle: ebook?.title || "Ebook Not Found",
+          ebookCover: ebook?.coverImage || null,
+        };
+      })
+    );
+
+    res.json({ success: true, sales: salesWithDetails });
+  } catch (error) {
+    console.error("Writer Sales Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+app.get('/api/v1/writer/analytics', async (req, res) => {
+  try {
+    await connectDB();
+    const { writerId } = req.query;
+
+    if (!writerId) return res.status(400).json({ success: false, message: "writerId is required" });
+
+    const ebooks = await ebooksCollection.find({ writerId }).toArray();
+    const sales = await transactionsCollection.find({ writerId }).toArray();
+
+    const totalEbooks = ebooks.length;
+    const publishedCount = ebooks.filter((e) => e.status === "Published").length;
+    const unpublishedCount = totalEbooks - publishedCount;
+    const totalSold = sales.length;
+    const totalRevenue = sales.reduce((sum, s) => sum + (s.amount || 0), 0);
+
+    const genreBreakdown = ebooks.reduce((acc, e) => {
+      acc[e.genre] = (acc[e.genre] || 0) + 1;
+      return acc;
+    }, {});
+
+    res.json({
+      success: true,
+      analytics: {
+        totalEbooks,
+        publishedCount,
+        unpublishedCount,
+        totalSold,
+        totalRevenue,
+        genreBreakdown,
+      },
+    });
+  } catch (error) {
+    console.error("Writer Analytics Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // Local vs Vercel
 if (require.main === module) {
   app.listen(port, () => {
     console.log(`Luminary server listening on port ${port}`);
   });
 } else {
-  console.log(" Vercel Serverless Mode");
+  console.log("Vercel Serverless Mode - Ready");
 }
 
 module.exports = app;
